@@ -1,14 +1,15 @@
+use circular_buffer::CircularBuffer;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eyre::{bail, Result};
 use fon::chan::Ch32;
 use fon::Audio;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 use webrtc_vad::Vad;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
 };
-use circular_buffer::CircularBuffer;
 
 struct VadWithSend(Vad);
 unsafe impl Send for VadWithSend {}
@@ -16,7 +17,7 @@ unsafe impl Send for VadWithSend {}
 type VadHandle = Arc<Mutex<VadWithSend>>;
 type TimestampHandle = Arc<Mutex<Instant>>;
 type SpeechStateHandle = Arc<Mutex<bool>>;
-type WhisperHandle = Arc<Mutex<Whisper>>;
+type BufferHandle = Arc<Mutex<Box<CircularBuffer<960000, f32>>>>;
 
 struct Whisper {
     state: WhisperState,
@@ -38,16 +39,13 @@ impl Whisper {
         params.set_suppress_blank(true);
         params.set_single_segment(true);
         params.set_debug_mode(false);
-        
+
         Self { state, params }
     }
 
     pub fn transcribe(&mut self, samples: &[f32]) -> String {
-        let samples: Vec<i16>= samples.iter().map(|&s| s as i16).collect();
-        let mut new_samples = vec![0.0f32; samples.len()];
-        whisper_rs::convert_integer_to_float_audio(&samples, &mut new_samples).unwrap();
-        self.state.full(self.params.clone(), &new_samples).unwrap();
-        self.state.full(self.params.clone(), &new_samples).unwrap();
+        let samples = whisper_rs::convert_stereo_to_mono_audio(&samples).unwrap();
+        self.state.full(self.params.clone(), &samples).unwrap();
         let num_segments = self.state.full_n_segments().unwrap();
         let mut text = String::new();
         for s in 0..num_segments {
@@ -58,14 +56,13 @@ impl Whisper {
 }
 
 fn main() -> Result<()> {
-    let mut buf = CircularBuffer::<960000, f32>::new(); // 60s (16000 * 60)
-    let mut whisper = Whisper::new();
+    let buf = CircularBuffer::boxed();
+    let whisper = Whisper::new();
     let whisper_handle = Arc::new(Mutex::new(whisper));
     let host = cpal::default_host();
 
     // Set up the input device and stream with the default input config.
     let device = host.default_input_device().unwrap();
-
     println!("Input device: {}", device.name()?);
 
     let config = device
@@ -87,41 +84,88 @@ fn main() -> Result<()> {
     let last_speech_timestamp = Arc::new(Mutex::new(Instant::now()));
     let is_speeching = Arc::new(Mutex::new(false));
 
+    // Start the transcription thread
+    let whisper_handle_clone = Arc::clone(&whisper_handle);
+    let buf_clone = Arc::new(Mutex::new(buf));
+    let buf_clone1 = buf_clone.clone();
+    let is_speeching_clone = Arc::clone(&is_speeching.clone());
+    thread::spawn(move || {
+        let buf_clone = buf_clone1.clone();
+
+        loop {
+            let is_speeching = is_speeching_clone.lock().unwrap();
+            let mut buffer = buf_clone.lock().unwrap();
+            let len = buffer.len();
+            if len > 0 && !*is_speeching {
+                drop(is_speeching);
+                println!("transcribe....");
+
+                let mut chunk = Vec::new();
+                while !buffer.is_empty() {
+                    let sample = buffer.pop_front().unwrap();
+                    chunk.push(sample);
+                }
+                buffer.clear();
+                drop(buffer);
+                let mut local_whisper = whisper_handle_clone.lock().unwrap();
+                let text = local_whisper.transcribe(&chunk);
+                println!("Transcribed text: {}", text);
+            } else {
+                drop(is_speeching);
+                drop(buffer);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    });
+
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => {
             let vad_clone = Arc::clone(&vad);
             let last_speech_timestamp_clone = Arc::clone(&last_speech_timestamp);
             let is_speeching_clone = Arc::clone(&is_speeching);
+            let buf_clone = Arc::clone(&buf_clone.clone());
             device.build_input_stream(
                 &config.into(),
-                move |data, _: &_| handle_input_data(data, &vad_clone, &last_speech_timestamp_clone, &is_speeching_clone),
+                move |data, _: &_| {
+                    handle_input_data(
+                        data,
+                        &vad_clone,
+                        &last_speech_timestamp_clone,
+                        &is_speeching_clone,
+                        &buf_clone,
+                    )
+                },
                 err_fn,
                 None,
             )?
-        },
+        }
         sample_format => {
-            bail!(
-                "Unsupported sample format '{sample_format}'"
-            )
+            bail!("Unsupported sample format '{sample_format}'")
         }
     };
 
     stream.play()?;
 
     // Let recording go for roughly ten seconds.
-    std::thread::sleep(std::time::Duration::from_secs(10));
-    drop(stream);
-    Ok(())
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));    
+    }
 }
 
-fn handle_input_data(input: &[f32], vad: &VadHandle, last_speech_timestamp: &TimestampHandle, is_speeching: &SpeechStateHandle) {
+fn handle_input_data(
+    input: &[f32],
+    vad: &VadHandle,
+    last_speech_timestamp: &TimestampHandle,
+    is_speeching: &SpeechStateHandle,
+    buf: &BufferHandle,
+) {
     let mut vad = vad.lock().unwrap();
     let mut last_speech_timestamp = last_speech_timestamp.lock().unwrap();
     let mut is_speeching = is_speeching.lock().unwrap();
+    let mut buffer = buf.lock().unwrap();
 
     let audio = Audio::<Ch32, 2>::with_f32_buffer(48000, input);
     let mut audio = Audio::<Ch32, 2>::with_audio(16000, &audio);
-    let resampled = audio.as_f32_slice();
     // volume up a bit
     let resampled: Vec<f32> = audio.as_f32_slice().iter().map(|&x| x * 5.0).collect();
     let mut i16_chunk: Vec<i16> = resampled.iter().map(|&x| (x * 32767.0) as i16).collect();
@@ -130,6 +174,10 @@ fn handle_input_data(input: &[f32], vad: &VadHandle, last_speech_timestamp: &Tim
 
     if is_speech {
         *last_speech_timestamp = Instant::now();
+        // Push audio data to circular buffer
+        for sample in resampled {
+            buffer.push_back(sample);
+        }
         if !*is_speeching {
             *is_speeching = true;
             println!("Speech detected.");
