@@ -914,6 +914,7 @@ dependencies = [
 [[package]]
 name = "whisper-rs"
 version = "0.12.1"
+source = "git+https://github.com/thewh1teagle/whisper-rs?branch=v1.6.2#fb85952be55025314e73f50ea043ada3cf07140c"
 dependencies = [
  "tracing",
  "whisper-rs-sys",
@@ -922,6 +923,7 @@ dependencies = [
 [[package]]
 name = "whisper-rs-sys"
 version = "0.10.1"
+source = "git+https://github.com/thewh1teagle/whisper-rs?branch=v1.6.2#fb85952be55025314e73f50ea043ada3cf07140c"
 dependencies = [
  "bindgen",
  "cfg-if",

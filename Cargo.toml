@@ -11,4 +11,4 @@ fon = "0.6.0"
 hound = "3.5.1"
 rubato = "0.15.0"
 webrtc-vad = "0.4.0"
-whisper-rs = { path = "../whisper-rs", features = ["opencl", "whisper-cpp-tracing"] }
+whisper-rs = { git = "https://github.com/thewh1teagle/whisper-rs", branch = "v1.6.2", features = ["opencl", "whisper-cpp-tracing"] }
