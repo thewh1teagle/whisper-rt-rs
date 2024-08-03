@@ -1,0 +1,12 @@
+[package]
+name = "whisper-rt-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cpal = "0.15.3"
+eyre = "0.6.12"
+fon = "0.6.0"
+hound = "3.5.1"
+rubato = "0.15.0"
+webrtc-vad = "0.4.0"
