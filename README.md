@@ -1,5 +1,7 @@
 # whisper-rt-rs
 
+Realtime transcription from whisper.cpp with voice detection.
+
 Experimental, but works on Windows 11.
 Install wget from winget.
 
