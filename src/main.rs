@@ -1,10 +1,14 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use webrtc_vad::Vad;
-use std::sync::{Arc, Mutex};
 use eyre::{bail, Result};
 use fon::chan::Ch32;
 use fon::Audio;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use webrtc_vad::Vad;
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
+use circular_buffer::CircularBuffer;
 
 struct VadWithSend(Vad);
 unsafe impl Send for VadWithSend {}
@@ -12,8 +16,51 @@ unsafe impl Send for VadWithSend {}
 type VadHandle = Arc<Mutex<VadWithSend>>;
 type TimestampHandle = Arc<Mutex<Instant>>;
 type SpeechStateHandle = Arc<Mutex<bool>>;
+type WhisperHandle = Arc<Mutex<Whisper>>;
+
+struct Whisper {
+    state: WhisperState,
+    params: FullParams<'static, 'static>,
+}
+
+impl Whisper {
+    pub fn new() -> Self {
+        whisper_rs::install_whisper_tracing_trampoline();
+        let ctx_params = WhisperContextParameters::default();
+        let ctx = WhisperContext::new_with_params("ggml-tiny.bin", ctx_params).unwrap();
+        let state = ctx.create_state().unwrap();
+        let mut params = FullParams::new(SamplingStrategy::default());
+        params.set_language(Some("en"));
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_special(false);
+        params.set_print_timestamps(false);
+        params.set_suppress_blank(true);
+        params.set_single_segment(true);
+        params.set_debug_mode(false);
+        
+        Self { state, params }
+    }
+
+    pub fn transcribe(&mut self, samples: &[f32]) -> String {
+        let samples: Vec<i16>= samples.iter().map(|&s| s as i16).collect();
+        let mut new_samples = vec![0.0f32; samples.len()];
+        whisper_rs::convert_integer_to_float_audio(&samples, &mut new_samples).unwrap();
+        self.state.full(self.params.clone(), &new_samples).unwrap();
+        self.state.full(self.params.clone(), &new_samples).unwrap();
+        let num_segments = self.state.full_n_segments().unwrap();
+        let mut text = String::new();
+        for s in 0..num_segments {
+            text += &self.state.full_get_segment_text_lossy(s).unwrap();
+        }
+        text
+    }
+}
 
 fn main() -> Result<()> {
+    let mut buf = CircularBuffer::<960000, f32>::new(); // 60s (16000 * 60)
+    let mut whisper = Whisper::new();
+    let whisper_handle = Arc::new(Mutex::new(whisper));
     let host = cpal::default_host();
 
     // Set up the input device and stream with the default input config.

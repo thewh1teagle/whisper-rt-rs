@@ -1,0 +1,6 @@
+{
+    "rust-analyzer.cargo.extraEnv": {
+        "CLBlast_DIR": "${workspaceFolder}\\clblast",
+        "LIBCLANG_PATH": "C:\\Program Files\\LLVM\\bin"
+    }
+}
