@@ -2,3 +2,7 @@
 *.bin
 clblast/
 *.wav
+*.onnx
+*.json
+*.txt
+*.gguf

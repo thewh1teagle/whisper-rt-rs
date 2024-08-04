@@ -15,7 +15,11 @@ $env:CLBlast_DIR = "$pwd\clblast\lib\cmake\CLBlast"
 $env:CMAKE_BUILD_TYPE = "RelWithDebInfo"
 cp C:\vcpkg\packages\opencl_x64-windows\bin\OpenCL.dll target\debug\
 cp .\clblast\bin\clblast.dll .\target\debug\
+$env:CMAKE_INCLUDE_PATH = "$pwd\clblast\include"
+$env:RUSTFLAGS = "-L $pwd\clblast\include"
+$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
 cargo run
+ollama run qwen2:1.5b-instruct-q4_0
 ```
 
 With `whisper-tiny` it works in realtime on cheap hardware (amd ryzen 5 4500u). the VAD is pretty good.

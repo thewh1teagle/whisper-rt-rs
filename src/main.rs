@@ -3,6 +3,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eyre::{bail, Result};
 use fon::chan::Ch32;
 use fon::Audio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,6 +11,9 @@ use webrtc_vad::Vad;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
 };
+use ollama_rs::{generation::completion::request::GenerationRequest, Ollama};
+mod tts;
+mod llm;
 
 struct VadWithSend(Vad);
 unsafe impl Send for VadWithSend {}
@@ -58,8 +62,13 @@ impl Whisper {
 fn main() -> Result<()> {
     let buf = CircularBuffer::boxed();
     let whisper = Whisper::new();
+    let mut tts = tts::Tts::new();
+    let mut llm = llm::Llm::new();
     let whisper_handle = Arc::new(Mutex::new(whisper));
+    let llm_handle = Arc::new(Mutex::new(llm));
+    let tts_handle = Arc::new(Mutex::new(tts));
     let host = cpal::default_host();
+    
 
     // Set up the input device and stream with the default input config.
     let device = host.default_input_device().unwrap();
@@ -83,7 +92,8 @@ fn main() -> Result<()> {
 
     let last_speech_timestamp = Arc::new(Mutex::new(Instant::now()));
     let is_speeching = Arc::new(Mutex::new(false));
-
+    let is_thinking = Arc::new(AtomicBool::new(false));
+    let is_thinking_clone = is_thinking.clone();
     // Start the transcription thread
     let whisper_handle_clone = Arc::clone(&whisper_handle);
     let buf_clone = Arc::new(Mutex::new(buf));
@@ -93,10 +103,13 @@ fn main() -> Result<()> {
         let buf_clone = buf_clone1.clone();
 
         loop {
+            
+            let is_thinking = is_thinking_clone.clone();
             let is_speeching = is_speeching_clone.lock().unwrap();
             let mut buffer = buf_clone.lock().unwrap();
             let len = buffer.len();
-            if len > 0 && !*is_speeching {
+            if len > 0 && !*is_speeching && !is_thinking.load(Ordering::SeqCst) {
+                is_thinking.store(true, Ordering::SeqCst);
                 drop(is_speeching);
                 println!("transcribe....");
 
@@ -110,10 +123,21 @@ fn main() -> Result<()> {
                 let mut local_whisper = whisper_handle_clone.lock().unwrap();
                 let text = local_whisper.transcribe(&chunk);
                 println!("Transcribed text: {}", text);
+                if !text.is_empty() && !text.contains("[") {
+                    let mut llm = llm_handle.lock().unwrap();
+                    let mut tts = tts_handle.lock().unwrap();
+                    let res = llm.ask(text);
+                    println!("{:?}", res);
+                    tts.speak(res);
+                }
+                is_thinking.store(false, Ordering::SeqCst);
+ 
+
             } else {
                 drop(is_speeching);
                 drop(buffer);
             }
+            
             thread::sleep(Duration::from_millis(50));
         }
     });
@@ -133,6 +157,7 @@ fn main() -> Result<()> {
                         &last_speech_timestamp_clone,
                         &is_speeching_clone,
                         &buf_clone,
+                        is_thinking.clone(),
                     )
                 },
                 err_fn,
@@ -158,6 +183,7 @@ fn handle_input_data(
     last_speech_timestamp: &TimestampHandle,
     is_speeching: &SpeechStateHandle,
     buf: &BufferHandle,
+    is_thinking: Arc<AtomicBool>,
 ) {
     let mut vad = vad.lock().unwrap();
     let mut last_speech_timestamp = last_speech_timestamp.lock().unwrap();
@@ -167,12 +193,12 @@ fn handle_input_data(
     let audio = Audio::<Ch32, 2>::with_f32_buffer(48000, input);
     let mut audio = Audio::<Ch32, 2>::with_audio(16000, &audio);
     // volume up a bit
-    let resampled: Vec<f32> = audio.as_f32_slice().iter().map(|&x| x * 5.0).collect();
+    let resampled: Vec<f32> = audio.as_f32_slice().iter().map(|&x| x * 10.0).collect();
     let mut i16_chunk: Vec<i16> = resampled.iter().map(|&x| (x * 32767.0) as i16).collect();
     i16_chunk.truncate(10 * 16000 / 1000);
     let is_speech = vad.0.is_voice_segment(&i16_chunk).unwrap_or_default();
 
-    if is_speech {
+    if is_speech && !is_thinking.load(Ordering::SeqCst) {
         *last_speech_timestamp = Instant::now();
         // Push audio data to circular buffer
         for sample in resampled {
@@ -182,7 +208,7 @@ fn handle_input_data(
             *is_speeching = true;
             println!("Speech detected.");
         }
-    } else {
+    } else if !is_thinking.load(Ordering::SeqCst) {
         if *is_speeching && last_speech_timestamp.elapsed() > Duration::from_millis(900) {
             *is_speeching = false;
             println!("End of speech detected.");
